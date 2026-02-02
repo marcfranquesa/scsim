@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "scsim"
 version = "0.1.0"
-description = "Add your description here"
+description = "Single-cell RNA-seq simulator using the Splatter statistical framework"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,8 +13,12 @@ dependencies = [
     "pandas>=2.3.3",
 ]
 
+[project.optional-dependencies]
+anndata = ["anndata>=0.10.0"]
+
 [dependency-groups]
 dev = [
+    "anndata>=0.10.0",
     "ipykernel>=7.1.0",
     "matplotlib>=3.10.8",
     "ruff>=0.14.14",

@@ -1,13 +1,16 @@
 """Single-cell RNA-seq simulator using the Splatter statistical framework."""
 
 import logging
-from typing import Self
+from typing import TYPE_CHECKING, Self
 
 import numpy as np
 import pandas as pd
 from numpy.random import Generator
 
 from .config import SimulationConfig
+
+if TYPE_CHECKING:
+    import anndata
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -392,3 +395,41 @@ class ScSim:
             groupmeancol = f"group{group}_genemean"
             self.geneparams[deratiocol] = all_de_ratio
             self.geneparams[groupmeancol] = group_mean
+
+    def to_anndata(self) -> "anndata.AnnData":
+        """Export simulation results to an AnnData object.
+
+        Requires the `anndata` package to be installed.
+        Install with: `pip install scsim[anndata]`
+
+        Returns:
+            AnnData object with:
+            - X: count matrix (cells x genes)
+            - obs: cell metadata from cellparams
+            - var: gene metadata from geneparams
+            - uns["scsim_config"]: simulation config as dict
+
+        Raises:
+            ImportError: If anndata is not installed.
+        """
+        try:
+            import anndata
+        except ImportError as e:
+            raise ImportError(
+                "anndata is required for to_anndata(). "
+                "Install with: pip install scsim[anndata]"
+            ) from e
+
+        from dataclasses import asdict
+
+        # Create AnnData object
+        adata = anndata.AnnData(
+            X=self.counts.values,
+            obs=self.cellparams.copy(),
+            var=self.geneparams.copy(),
+        )
+
+        # Store config in uns
+        adata.uns["scsim_config"] = asdict(self.config)
+
+        return adata
