@@ -1,3 +1,6 @@
-from .core import scsim
+"""Single-cell RNA-seq simulator using the Splatter statistical framework."""
 
-__all__ = ["scsim"]
+from .config import SimulationConfig
+from .core import ScSim
+
+__all__ = ["ScSim", "SimulationConfig"]
