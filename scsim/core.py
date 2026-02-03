@@ -1,13 +1,14 @@
 """Single-cell RNA-seq simulator using the Splatter statistical framework."""
 
 import logging
-from typing import TYPE_CHECKING, Self
+import warnings
+from typing import TYPE_CHECKING, Optional, Self
 
 import numpy as np
 import pandas as pd
 from numpy.random import Generator
 
-from .config import SimulationConfig
+from .config import PerturbationConfig, SimulationConfig
 
 if TYPE_CHECKING:
     import anndata
@@ -63,6 +64,12 @@ class ScSim:
         self._cellnames: list[str]
         self._genenames: list[str]
         self._groups: np.ndarray
+
+        # Perturbation state (populated by add_perturbation)
+        self._has_perturbation: bool = False
+        self.perturb_config: Optional[PerturbationConfig] = None
+        self.perturbed_counts: Optional[pd.DataFrame] = None
+        self.perturbed_cellparams: Optional[pd.DataFrame] = None
 
     def simulate(self) -> Self:
         """Run the full simulation pipeline.
@@ -396,8 +403,243 @@ class ScSim:
             self.geneparams[deratiocol] = all_de_ratio
             self.geneparams[groupmeancol] = group_mean
 
+    def add_perturbation(self, perturb_config: PerturbationConfig) -> Self:
+        """Add a perturbation condition to the simulation.
+
+        The perturbation is modeled as replacing the activity program with a
+        perturbation program. For cells with an active program:
+
+        Control:   prog_usage × activity_program
+        Perturbed: prog_usage × ((1-strength) × activity + strength × perturb)
+
+        This preserves cell identity (group, library size) while modifying the
+        expression program, which is ideal for counterfactual simulation.
+
+        After calling this method:
+        - `self.counts` contains control condition counts
+        - `self.perturbed_counts` contains perturbed condition counts
+        - `self.geneparams` is updated with `is_de` and `perturb_de_ratio` columns
+        - `to_anndata()` will return a combined AnnData with both conditions
+
+        Args:
+            perturb_config: PerturbationConfig with perturbation parameters.
+
+        Returns:
+            Self for method chaining.
+
+        Raises:
+            ValueError: If simulate() hasn't been called or no program is configured.
+
+        Example:
+            >>> config = SimulationConfig(ngenes=1000, ncells=100, nproggenes=50, ...)
+            >>> sim = ScSim(config).simulate()
+            >>> sim.add_perturbation(PerturbationConfig(strength=0.8))
+            >>> adata = sim.to_anndata()  # Contains both control and perturbed
+        """
+        if not hasattr(self, "counts") or self.counts is None:
+            raise ValueError("Must call simulate() first before adding perturbation")
+
+        nproggenes = self.config.nproggenes
+        if nproggenes is None or nproggenes == 0:
+            raise ValueError(
+                "Perturbation simulation requires a program (nproggenes > 0). "
+                "The activity program represents the baseline state that gets "
+                "modified by the perturbation."
+            )
+
+        if self._has_perturbation:
+            warnings.warn(
+                "Perturbation already exists. Overwriting with new perturbation.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        logger.info("Adding perturbation to simulation")
+        self.perturb_config = perturb_config
+
+        # Set up perturbation RNG
+        perturb_seed = perturb_config.seed
+        if perturb_seed is None:
+            perturb_seed = self.config.seed + 1000
+        perturb_rng = np.random.default_rng(perturb_seed)
+
+        # Identify which genes are affected by perturbation
+        prog_gene_mask = self.geneparams["prog_gene"].values.astype(bool)
+        prog_gene_indices = np.where(prog_gene_mask)[0]
+
+        if perturb_config.affect_all_prog_genes:
+            perturb_gene_mask = prog_gene_mask.copy()
+        else:
+            # Select subset of program genes to be affected
+            n_perturb = int(len(prog_gene_indices) * perturb_config.perturb_gene_frac)
+            n_perturb = max(1, n_perturb)
+            perturb_indices = perturb_rng.choice(
+                prog_gene_indices, size=n_perturb, replace=False
+            )
+            perturb_gene_mask = np.zeros(self.config.ngenes, dtype=bool)
+            perturb_gene_mask[perturb_indices] = True
+
+        n_perturb_genes = perturb_gene_mask.sum()
+        logger.info(f"Perturbation affects {n_perturb_genes} genes")
+
+        # Generate perturbation DE ratios for affected genes
+        perturb_de_ratios = perturb_rng.lognormal(
+            mean=perturb_config.perturb_deloc,
+            sigma=perturb_config.perturb_descale,
+            size=n_perturb_genes,
+        )
+        # Ensure ratios represent actual fold changes (>1 or <1)
+        perturb_de_ratios[perturb_de_ratios < 1] = 1 / perturb_de_ratios[
+            perturb_de_ratios < 1
+        ]
+
+        # Determine up/down regulation
+        is_down = perturb_rng.choice(
+            [True, False],
+            size=n_perturb_genes,
+            p=[perturb_config.perturb_downprob, 1 - perturb_config.perturb_downprob],
+        )
+        perturb_de_ratios[is_down] = 1.0 / perturb_de_ratios[is_down]
+
+        # Update geneparams with perturbation info
+        self.geneparams["is_de"] = perturb_gene_mask
+        all_de_ratios = np.ones(self.config.ngenes)
+        all_de_ratios[perturb_gene_mask] = perturb_de_ratios
+        self.geneparams["perturb_de_ratio"] = all_de_ratios
+
+        # Calculate perturbed program means
+        perturb_prog_genemean = self.geneparams["gene_mean"].values.copy()
+        perturb_prog_genemean[perturb_gene_mask] *= perturb_de_ratios
+        self.geneparams["perturb_prog_genemean"] = perturb_prog_genemean
+
+        # Calculate cell-level perturbation response
+        if perturb_config.heterogeneous_response:
+            cell_response = perturb_rng.uniform(
+                low=perturb_config.min_response,
+                high=perturb_config.max_response,
+                size=len(self._cellnames),
+            )
+        else:
+            cell_response = np.ones(len(self._cellnames))
+
+        # Create perturbed cell params (copy of control with added columns)
+        self.perturbed_cellparams = self.cellparams.copy()
+        self.perturbed_cellparams["perturb_response"] = cell_response
+
+        # Calculate perturbed cell-gene means
+        logger.info("Calculating perturbed cell-gene means")
+        perturbed_cellgenemean = self._get_perturbed_cell_gene_means(
+            perturb_config, perturb_prog_genemean, cell_response
+        )
+
+        # Apply BCV and sample perturbed counts
+        logger.info("Sampling perturbed counts")
+        perturbed_bcv = self.config.bcv_dispersion + (1 / np.sqrt(perturbed_cellgenemean))
+        chisamp = perturb_rng.chisquare(self.config.bcv_dof, size=self.config.ngenes)
+        perturbed_bcv = perturbed_bcv * np.sqrt(self.config.bcv_dof / chisamp)
+        perturbed_updatedmean = perturb_rng.gamma(
+            shape=1 / (perturbed_bcv**2),
+            scale=perturbed_cellgenemean * (perturbed_bcv**2),
+        )
+
+        self.perturbed_counts = pd.DataFrame(
+            perturb_rng.poisson(lam=perturbed_updatedmean),
+            index=self._cellnames,
+            columns=self._genenames,
+        )
+
+        self._has_perturbation = True
+        logger.info("Perturbation added successfully")
+
+        return self
+
+    def _get_perturbed_cell_gene_means(
+        self,
+        perturb_config: PerturbationConfig,
+        perturb_prog_genemean: np.ndarray,
+        cell_response: np.ndarray,
+    ) -> np.ndarray:
+        """Calculate cell-gene means under perturbation.
+
+        For cells with the program:
+        mean = (1 - prog_usage) × group_mean
+             + prog_usage × ((1 - effective_strength) × activity_prog
+                            + effective_strength × perturb_prog)
+
+        Where effective_strength = strength × cell_response
+
+        For cells without the program:
+        mean = group_mean (unchanged from control)
+
+        Args:
+            perturb_config: Perturbation configuration.
+            perturb_prog_genemean: Perturbation program mean expression per gene.
+            cell_response: Per-cell response intensity (0-1).
+
+        Returns:
+            Array with perturbed cell-gene means (cells × genes).
+        """
+        strength = perturb_config.strength
+
+        # Get group-specific normalized means
+        group_genemean = self.geneparams.loc[
+            :,
+            [
+                x
+                for x in self.geneparams.columns
+                if ("_genemean" in x) and ("group" in x)
+            ],
+        ].T.astype(float)
+        group_genemean = group_genemean.div(group_genemean.sum(axis=1), axis=0)
+
+        # Normalize program means
+        activity_prog = self.geneparams["prog_genemean"].values
+        activity_prog_norm = activity_prog / activity_prog.sum()
+        perturb_prog_norm = perturb_prog_genemean / perturb_prog_genemean.sum()
+
+        # Get cell group indices
+        ind = self.cellparams["group"].apply(lambda x: f"group{x}_genemean")
+
+        # Initialize output array
+        cellgenemean = np.zeros((len(self._cellnames), self.config.ngenes))
+
+        for i, cell_name in enumerate(self._cellnames):
+            group_idx = ind.loc[cell_name]
+            base_mean = group_genemean.loc[group_idx, :].values
+
+            if self.cellparams.loc[cell_name, "has_program"]:
+                prog_usage = self.cellparams.loc[cell_name, "program_usage"]
+                effective_strength = strength * cell_response[i]
+
+                # (1 - prog_usage) × group_mean
+                base_contrib = (1 - prog_usage) * base_mean
+
+                # prog_usage × ((1 - es) × activity + es × perturb)
+                mixed_prog = (
+                    (1 - effective_strength) * activity_prog_norm
+                    + effective_strength * perturb_prog_norm
+                )
+                prog_contrib = prog_usage * mixed_prog
+
+                cellgenemean[i, :] = base_contrib + prog_contrib
+            else:
+                # No program - same as control
+                cellgenemean[i, :] = base_mean
+
+        # Normalize by cell library size
+        row_sums = cellgenemean.sum(axis=1, keepdims=True)
+        cellgenemean = cellgenemean / row_sums
+        libsizes = self.cellparams["libsize"].values[:, np.newaxis]
+        cellgenemean = cellgenemean * libsizes
+
+        return cellgenemean
+
     def to_anndata(self) -> "anndata.AnnData":
         """Export simulation results to an AnnData object.
+
+        If a perturbation has been added, returns a combined AnnData with both
+        control and perturbed conditions. Cells are named with condition prefix
+        (e.g., "control_cell1", "perturbed_cell1").
 
         Requires the `anndata` package to be installed.
         Install with: `pip install scsim[anndata]`
@@ -405,9 +647,10 @@ class ScSim:
         Returns:
             AnnData object with:
             - X: count matrix (cells x genes)
-            - obs: cell metadata from cellparams
-            - var: gene metadata from geneparams
+            - obs: cell metadata including 'condition' and 'cell_id' columns
+            - var: gene metadata from geneparams (includes 'is_de' if perturbed)
             - uns["scsim_config"]: simulation config as dict
+            - uns["perturb_config"]: perturbation config as dict (if perturbed)
 
         Raises:
             ImportError: If anndata is not installed.
@@ -422,14 +665,50 @@ class ScSim:
 
         from dataclasses import asdict
 
-        # Create AnnData object
+        if not self._has_perturbation:
+            # Original behavior - just control
+            adata = anndata.AnnData(
+                X=self.counts.values,
+                obs=self.cellparams.copy(),
+                var=self.geneparams.copy(),
+            )
+            adata.uns["scsim_config"] = asdict(self.config)
+            return adata
+
+        # Combined control + perturbed
+        # Create cell names with condition prefix (lowercase)
+        control_names = [f"control_{name.lower()}" for name in self._cellnames]
+        perturbed_names = [f"perturbed_{name.lower()}" for name in self._cellnames]
+
+        # Combine counts
+        control_counts = self.counts.copy()
+        control_counts.index = control_names
+        perturbed_counts = self.perturbed_counts.copy()
+        perturbed_counts.index = perturbed_names
+        combined_counts = pd.concat([control_counts, perturbed_counts], axis=0)
+
+        # Combine cell params
+        control_obs = self.cellparams.copy()
+        control_obs.index = control_names
+        control_obs["condition"] = "control"
+        control_obs["cell_id"] = [name.lower() for name in self._cellnames]
+
+        perturbed_obs = self.perturbed_cellparams.copy()
+        perturbed_obs.index = perturbed_names
+        perturbed_obs["condition"] = "perturbed"
+        perturbed_obs["cell_id"] = [name.lower() for name in self._cellnames]
+
+        combined_obs = pd.concat([control_obs, perturbed_obs], axis=0)
+
+        # Create AnnData
         adata = anndata.AnnData(
-            X=self.counts.values,
-            obs=self.cellparams.copy(),
+            X=combined_counts.values,
+            obs=combined_obs,
             var=self.geneparams.copy(),
         )
 
-        # Store config in uns
+        # Store configs in uns
         adata.uns["scsim_config"] = asdict(self.config)
+        adata.uns["perturb_config"] = asdict(self.perturb_config)
 
         return adata

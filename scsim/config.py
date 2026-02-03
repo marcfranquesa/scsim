@@ -142,3 +142,61 @@ class SimulationConfig:
                 raise ValueError("progcellfrac required when nproggenes > 0")
             if not 0 <= self.progcellfrac <= 1:
                 raise ValueError("progcellfrac must be between 0 and 1")
+
+
+@dataclass
+class PerturbationConfig:
+    """Configuration for perturbation effects on gene expression programs.
+
+    The perturbation model works by replacing the activity program with a
+    perturbation program. For cells with an active program:
+
+    Control:   prog_usage × activity_program
+    Perturbed: prog_usage × ((1 - strength) × activity_program + strength × perturb_program)
+
+    This models scenarios like CRISPR knockouts, drug treatments, or other
+    interventions that modify cellular programs.
+
+    Attributes:
+        perturb_deloc: Mean of log-normal distribution for perturbation DE fold changes.
+        perturb_descale: Standard deviation of log-normal for perturbation DE.
+        perturb_downprob: Probability that a perturbed gene is downregulated.
+        strength: How much of activity program is replaced (0=none, 1=fully replaced).
+        affect_all_prog_genes: If True, all program genes are affected by perturbation.
+            If False, only a subset is affected (controlled by perturb_gene_frac).
+        perturb_gene_frac: Fraction of program genes affected (if not affect_all_prog_genes).
+        heterogeneous_response: If True, cells respond with varying intensity.
+        min_response: Minimum response level per cell (if heterogeneous).
+        max_response: Maximum response level per cell (if heterogeneous).
+        seed: Random seed for perturbation effects (separate from base simulation).
+    """
+
+    perturb_deloc: float = 0.5
+    perturb_descale: float = 0.5
+    perturb_downprob: float = 0.5
+    strength: float = 0.8
+    affect_all_prog_genes: bool = True
+    perturb_gene_frac: float = 0.5
+    heterogeneous_response: bool = False
+    min_response: float = 0.5
+    max_response: float = 1.0
+    seed: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        """Validate perturbation configuration parameters."""
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate that all parameters are within acceptable ranges."""
+        if not 0 <= self.strength <= 1:
+            raise ValueError("strength must be between 0 and 1")
+        if not 0 <= self.perturb_downprob <= 1:
+            raise ValueError("perturb_downprob must be between 0 and 1")
+        if not 0 <= self.perturb_gene_frac <= 1:
+            raise ValueError("perturb_gene_frac must be between 0 and 1")
+        if not 0 <= self.min_response <= 1:
+            raise ValueError("min_response must be between 0 and 1")
+        if not 0 <= self.max_response <= 1:
+            raise ValueError("max_response must be between 0 and 1")
+        if self.min_response > self.max_response:
+            raise ValueError("min_response cannot exceed max_response")
