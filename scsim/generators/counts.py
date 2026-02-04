@@ -33,11 +33,7 @@ def get_cell_gene_means(
     """
     group_genemean = geneparams.loc[
         :,
-        [
-            x
-            for x in geneparams.columns
-            if ("_genemean" in x) and ("group" in x)
-        ],
+        [x for x in geneparams.columns if ("_genemean" in x) and ("group" in x)],
     ].T.astype(float)
     group_genemean = group_genemean.div(group_genemean.sum(axis=1), axis=0)
     ind = cellparams["group"].apply(lambda x: f"group{x}_genemean")
@@ -106,9 +102,7 @@ def adjust_means_bcv(
     chisamp = rng.chisquare(bcv_dof, size=ngenes)
     bcv = bcv * np.sqrt(bcv_dof / chisamp)
 
-    updatedmean = rng.gamma(
-        shape=1 / (bcv**2), scale=cellgenemean * (bcv**2)
-    )
+    updatedmean = rng.gamma(shape=1 / (bcv**2), scale=cellgenemean * (bcv**2))
 
     bcv = pd.DataFrame(bcv, index=cellnames, columns=genenames)
     updatedmean = pd.DataFrame(updatedmean, index=cellnames, columns=genenames)

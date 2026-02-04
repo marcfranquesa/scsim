@@ -201,7 +201,9 @@ class ScSim:
         perturbation program. For cells with an active program:
 
         Control:   prog_usage × activity_program
-        Perturbed: prog_usage × ((1-strength) × activity + strength × perturb)
+        Perturbed: prog_usage × ((1 - response) × activity + response × perturb)
+
+        Where `response` is sampled per-cell from [min_response, max_response].
 
         This preserves cell identity (group, library size) while modifying the
         expression program, which is ideal for counterfactual simulation.
@@ -224,7 +226,7 @@ class ScSim:
         Example:
             >>> config = SimulationConfig(ngenes=1000, ncells=100, nproggenes=50, ...)
             >>> sim = ScSim(config).simulate()
-            >>> sim.add_perturbation(PerturbationConfig(strength=0.8))
+            >>> sim.add_perturbation(PerturbationConfig(min_response=0.8, max_response=0.8))
             >>> adata = sim.to_anndata()  # Contains both control and perturbed
         """
         if not hasattr(self, "counts") or self.counts is None:

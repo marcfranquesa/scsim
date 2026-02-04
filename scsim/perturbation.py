@@ -16,7 +16,6 @@ def get_perturbed_cell_gene_means(
     cellparams: pd.DataFrame,
     cellnames: list[str],
     ngenes: int,
-    perturb_config: PerturbationConfig,
     perturb_prog_genemean: np.ndarray,
     cell_response: np.ndarray,
 ) -> np.ndarray:
@@ -24,10 +23,8 @@ def get_perturbed_cell_gene_means(
 
     For cells with the program:
     mean = (1 - prog_usage) × group_mean
-         + prog_usage × ((1 - effective_strength) × activity_prog
-                        + effective_strength × perturb_prog)
-
-    Where effective_strength = strength × cell_response
+         + prog_usage × ((1 - response) × activity_prog
+                        + response × perturb_prog)
 
     For cells without the program:
     mean = group_mean (unchanged from control)
@@ -37,23 +34,16 @@ def get_perturbed_cell_gene_means(
         cellparams: Cell parameters DataFrame.
         cellnames: List of cell names.
         ngenes: Number of genes.
-        perturb_config: Perturbation configuration.
         perturb_prog_genemean: Perturbation program mean expression per gene.
         cell_response: Per-cell response intensity (0-1).
 
     Returns:
         Array with perturbed cell-gene means (cells × genes).
     """
-    strength = perturb_config.strength
-
     # Get group-specific normalized means
     group_genemean = geneparams.loc[
         :,
-        [
-            x
-            for x in geneparams.columns
-            if ("_genemean" in x) and ("group" in x)
-        ],
+        [x for x in geneparams.columns if ("_genemean" in x) and ("group" in x)],
     ].T.astype(float)
     group_genemean = group_genemean.div(group_genemean.sum(axis=1), axis=0)
 
@@ -74,16 +64,15 @@ def get_perturbed_cell_gene_means(
 
         if cellparams.loc[cell_name, "has_program"]:
             prog_usage = cellparams.loc[cell_name, "program_usage"]
-            effective_strength = strength * cell_response[i]
+            response = cell_response[i]
 
             # (1 - prog_usage) × group_mean
             base_contrib = (1 - prog_usage) * base_mean
 
-            # prog_usage × ((1 - es) × activity + es × perturb)
+            # prog_usage × ((1 - response) × activity + response × perturb)
             mixed_prog = (
-                (1 - effective_strength) * activity_prog_norm
-                + effective_strength * perturb_prog_norm
-            )
+                1 - response
+            ) * activity_prog_norm + response * perturb_prog_norm
             prog_contrib = prog_usage * mixed_prog
 
             cellgenemean[i, :] = base_contrib + prog_contrib
@@ -117,7 +106,9 @@ def apply_perturbation(
     perturbation program. For cells with an active program:
 
     Control:   prog_usage × activity_program
-    Perturbed: prog_usage × ((1-strength) × activity + strength × perturb)
+    Perturbed: prog_usage × ((1 - response) × activity + response × perturb)
+
+    Where `response` is sampled per-cell from [min_response, max_response].
 
     Args:
         rng: NumPy random generator for perturbation.
@@ -137,15 +128,16 @@ def apply_perturbation(
     prog_gene_mask = geneparams["prog_gene"].values.astype(bool)
     prog_gene_indices = np.where(prog_gene_mask)[0]
 
-    if perturb_config.affect_all_prog_genes:
+    # Select subset of program genes to be affected based on perturb_gene_frac
+    n_perturb = int(len(prog_gene_indices) * perturb_config.perturb_gene_frac)
+    n_perturb = max(1, n_perturb)
+
+    if n_perturb >= len(prog_gene_indices):
+        # All program genes affected
         perturb_gene_mask = prog_gene_mask.copy()
     else:
-        # Select subset of program genes to be affected
-        n_perturb = int(len(prog_gene_indices) * perturb_config.perturb_gene_frac)
-        n_perturb = max(1, n_perturb)
-        perturb_indices = rng.choice(
-            prog_gene_indices, size=n_perturb, replace=False
-        )
+        # Random subset of program genes affected
+        perturb_indices = rng.choice(prog_gene_indices, size=n_perturb, replace=False)
         perturb_gene_mask = np.zeros(ngenes, dtype=bool)
         perturb_gene_mask[perturb_indices] = True
 
@@ -159,9 +151,9 @@ def apply_perturbation(
         size=n_perturb_genes,
     )
     # Ensure ratios represent actual fold changes (>1 or <1)
-    perturb_de_ratios[perturb_de_ratios < 1] = 1 / perturb_de_ratios[
-        perturb_de_ratios < 1
-    ]
+    perturb_de_ratios[perturb_de_ratios < 1] = (
+        1 / perturb_de_ratios[perturb_de_ratios < 1]
+    )
 
     # Determine up/down regulation
     is_down = rng.choice(
@@ -183,14 +175,11 @@ def apply_perturbation(
     geneparams["perturb_prog_genemean"] = perturb_prog_genemean
 
     # Calculate cell-level perturbation response
-    if perturb_config.heterogeneous_response:
-        cell_response = rng.uniform(
-            low=perturb_config.min_response,
-            high=perturb_config.max_response,
-            size=len(cellnames),
-        )
-    else:
-        cell_response = np.ones(len(cellnames))
+    cell_response = rng.uniform(
+        low=perturb_config.min_response,
+        high=perturb_config.max_response,
+        size=len(cellnames),
+    )
 
     # Create perturbed cell params (copy of control with added columns)
     perturbed_cellparams = cellparams.copy()
@@ -199,8 +188,7 @@ def apply_perturbation(
     # Calculate perturbed cell-gene means
     logger.info("Calculating perturbed cell-gene means")
     perturbed_cellgenemean = get_perturbed_cell_gene_means(
-        geneparams, cellparams, cellnames, ngenes,
-        perturb_config, perturb_prog_genemean, cell_response
+        geneparams, cellparams, cellnames, ngenes, perturb_prog_genemean, cell_response
     )
 
     # Apply BCV and sample perturbed counts

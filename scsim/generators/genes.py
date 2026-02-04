@@ -33,9 +33,7 @@ def simulate_gene_params(
     """
     basegenemean = rng.gamma(shape=mean_shape, scale=1.0 / mean_rate, size=ngenes)
 
-    is_outlier = rng.choice(
-        [True, False], size=ngenes, p=[expoutprob, 1 - expoutprob]
-    )
+    is_outlier = rng.choice([True, False], size=ngenes, p=[expoutprob, 1 - expoutprob])
     outlier_ratio = np.ones(shape=ngenes)
     outliers = rng.lognormal(mean=expoutloc, sigma=expoutscale, size=is_outlier.sum())
     outlier_ratio[is_outlier] = outliers
