@@ -83,6 +83,9 @@ class ScSim:
         self.perturbed_counts: Optional[pd.DataFrame] = None
         self.perturbed_cellparams: Optional[pd.DataFrame] = None
 
+        # Noise state for shared noise counterfactuals
+        self._noise_multiplier: Optional[np.ndarray] = None
+
     def simulate(self) -> Self:
         """Run the full simulation pipeline.
 
@@ -184,6 +187,16 @@ class ScSim:
             bcv_dof=cfg.bcv_dof,
         )
 
+        # Store noise multiplier for potential shared noise perturbation
+        # This captures the gamma/BCV noise: how much each cell-gene deviates from its mean
+        cellgenemean_arr = self.cellgenemean.values
+        with np.errstate(divide="ignore", invalid="ignore"):
+            self._noise_multiplier = np.where(
+                cellgenemean_arr > 0,
+                self.updatedmean.values / cellgenemean_arr,
+                1.0,  # Default multiplier for zero-mean genes
+            )
+
         logger.info("Simulating counts")
         self.counts = simulate_counts(
             rng=self._rng,
@@ -207,6 +220,10 @@ class ScSim:
 
         This preserves cell identity (group, library size) while modifying the
         expression program, which is ideal for counterfactual simulation.
+
+        When `shared_noise=True` (default), the biological noise from control is
+        reused for the perturbed counts. This creates true counterfactuals where
+        only the perturbation effect differs, not the noise realization.
 
         After calling this method:
         - `self.counts` contains control condition counts
@@ -268,6 +285,7 @@ class ScSim:
                 bcv_dispersion=self.config.bcv_dispersion,
                 bcv_dof=self.config.bcv_dof,
                 perturb_config=perturb_config,
+                noise_multiplier=self._noise_multiplier,
             )
         )
 

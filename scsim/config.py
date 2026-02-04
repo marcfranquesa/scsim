@@ -168,6 +168,8 @@ class PerturbationConfig:
         min_response: Minimum perturbation response per cell (0=no effect, 1=full effect).
         max_response: Maximum perturbation response per cell (0=no effect, 1=full effect).
             Set min_response == max_response for uniform response across all cells.
+        shared_noise: If True, reuse noise from control for true counterfactual simulation.
+            The same biological/technical noise is applied to perturbed means.
         seed: Random seed for perturbation effects (separate from base simulation).
     """
 
@@ -177,6 +179,7 @@ class PerturbationConfig:
     perturb_gene_frac: float = 1.0
     min_response: float = 0.8
     max_response: float = 0.8
+    shared_noise: bool = True
     seed: Optional[int] = None
 
     def __post_init__(self) -> None:

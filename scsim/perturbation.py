@@ -99,6 +99,7 @@ def apply_perturbation(
     bcv_dispersion: float,
     bcv_dof: int,
     perturb_config: PerturbationConfig,
+    noise_multiplier: np.ndarray | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Apply perturbation to generate perturbed counts.
 
@@ -120,6 +121,8 @@ def apply_perturbation(
         bcv_dispersion: BCV dispersion parameter.
         bcv_dof: BCV degrees of freedom.
         perturb_config: Perturbation configuration.
+        noise_multiplier: Pre-computed noise multiplier from control simulation
+            (used when shared_noise=True for counterfactual simulation).
 
     Returns:
         Tuple of (perturbed_counts, perturbed_cellparams, updated_geneparams).
@@ -191,15 +194,21 @@ def apply_perturbation(
         geneparams, cellparams, cellnames, ngenes, perturb_prog_genemean, cell_response
     )
 
-    # Apply BCV and sample perturbed counts
-    logger.info("Sampling perturbed counts")
-    perturbed_bcv = bcv_dispersion + (1 / np.sqrt(perturbed_cellgenemean))
-    chisamp = rng.chisquare(bcv_dof, size=ngenes)
-    perturbed_bcv = perturbed_bcv * np.sqrt(bcv_dof / chisamp)
-    perturbed_updatedmean = rng.gamma(
-        shape=1 / (perturbed_bcv**2),
-        scale=perturbed_cellgenemean * (perturbed_bcv**2),
-    )
+    # Apply noise and sample perturbed counts
+    if perturb_config.shared_noise and noise_multiplier is not None:
+        # Shared noise: reuse noise from control for true counterfactual
+        logger.info("Using shared noise from control (counterfactual mode)")
+        perturbed_updatedmean = perturbed_cellgenemean * noise_multiplier
+    else:
+        # Independent noise: sample new BCV and gamma noise
+        logger.info("Sampling independent noise for perturbed counts")
+        perturbed_bcv = bcv_dispersion + (1 / np.sqrt(perturbed_cellgenemean))
+        chisamp = rng.chisquare(bcv_dof, size=ngenes)
+        perturbed_bcv = perturbed_bcv * np.sqrt(bcv_dof / chisamp)
+        perturbed_updatedmean = rng.gamma(
+            shape=1 / (perturbed_bcv**2),
+            scale=perturbed_cellgenemean * (perturbed_bcv**2),
+        )
 
     perturbed_counts = pd.DataFrame(
         rng.poisson(lam=perturbed_updatedmean),
